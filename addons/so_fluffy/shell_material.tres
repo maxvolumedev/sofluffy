@@ -1,6 +1,6 @@
-[gd_resource type="ShaderMaterial" load_steps=2 format=3 uid="uid://d23fcf8nvkobb"]
+[gd_resource type="ShaderMaterial" format=3 uid="uid://d23fcf8nvkobb"]
 
-[ext_resource type="Shader" path="res://addons/so_fluffy/so_fluffy.gdshader" id="1_4cy67"]
+[ext_resource type="Shader" uid="uid://d28twy3oqjcn7" path="res://addons/so_fluffy/so_fluffy.gdshader" id="1_4cy67"]
 
 [resource]
 render_priority = 0
@@ -17,16 +17,17 @@ shader_parameter/scruffiness = 0.5
 shader_parameter/use_heightmap_texture = false
 shader_parameter/turbulence_strength = 0.5
 shader_parameter/jitter_strength = 0.0
-shader_parameter/color = null
+shader_parameter/color = Color(0, 0, 0, 1)
 shader_parameter/use_height_gradient = false
 shader_parameter/scale_height_gradient = true
 shader_parameter/use_albedo_texture = false
 shader_parameter/use_emission = false
-shader_parameter/emission_color = null
-shader_parameter/emission_energy_multiplier = null
+shader_parameter/emission_color = Color(0, 0, 0, 1)
+shader_parameter/emission_energy_multiplier = 0.0
 shader_parameter/use_emission_texture = false
 shader_parameter/use_thickness_curve = false
 shader_parameter/thickness_scale = 1.0
-shader_parameter/physics_pos_offset = Vector3(0, -1, 0)
-shader_parameter/physics_rot_offset = null
+shader_parameter/physics_h = 0.0
+shader_parameter/turbulence_falloff = 1.0
+shader_parameter/height_shade = 0.0
 metadata/is_fur = true

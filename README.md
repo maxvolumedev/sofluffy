@@ -250,6 +250,8 @@ Texture defining emission color. Emission color is [i]added[i] to the texture co
 
 ## Physics
 
+Physics offsets are passed to the shader as per-instance uniforms (`physics_pos_offset`, `physics_rot_offset`) on the geometry node. If you attach several Fur nodes to the same geometry, they share one physics state - the node that updates last wins, so give them identical physics settings.
+
 ### Physics Enabled
 
 Disable physics processing altogether. Physics simulation is very cheap, but should be disabled if the fur will not be subject to any movement.

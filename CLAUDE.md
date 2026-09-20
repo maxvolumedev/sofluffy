@@ -49,11 +49,11 @@ Every exported property has a setter. Appearance and growth properties call `set
 
 ### LOD
 
-`shells` always holds the full chain. `_process()` computes `lod` from the camera distance to the parent's AABB. When `lod` changes, `apply_lod()` rewires `next_pass` pointers to skip shells so that only `lod_shell_count` evenly spaced shells are rendered. `h` values are not recomputed, so the fur keeps its length. Strand thickness is scaled by an empirical power function of the shell count to keep visual density constant.
+`shells` always holds the full chain. `_process()` computes the camera distance to the parent's AABB and quantises it into `LOD_STEPS` discrete steps with hysteresis. When `lod` changes, `apply_lod()` rewires `next_pass` pointers to skip shells so that only `lod_shell_count` evenly spaced shells are rendered, and `update_lod_thickness()` re-uploads strand thickness, the only LOD-dependent uniform. `h` values are not recomputed, so the fur keeps its length. Do not call `setup_materials()` from per-frame paths: uploading every uniform to every shell was the dominant CPU cost before.
 
 ### Physics
 
-`_physics_process()` runs two independent damped springs driven by the parent's frame-to-frame translation and Euler rotation. Results are written per shell as `physics_pos_offset` and `physics_rot_offset`, scaled by `pow(h, stiffness)` so tips move more than roots. Physics uniforms are written every tick and deliberately bypass `setup_materials()`.
+`_physics_process()` runs two independent damped springs driven by the parent's frame-to-frame translation and Euler rotation. The tip offsets go to the shader as two per-instance uniforms set on the parent geometry via `send_physics()`, which skips unchanged values. Each shell scales them by its own `physics_h` uniform, `pow(h, stiffness)`, so tips move more than roots. Never write per-shell uniforms per tick. Because instance uniforms belong to the geometry, several Fur nodes on one geometry share physics state.
 
 ### Shader details that are easy to miss
 
@@ -61,6 +61,10 @@ Every exported property has a setter. Appearance and growth properties call `set
 - Vertex color green (`COLOR.g`) scales strand length per vertex. Meshes with black vertex colors grow no fur.
 - The heightmap is sampled at the undisplaced UV; turbulence and jitter only move the strand lookup.
 - Lighting is a custom half-Lambert `light()` function, and culling is disabled with normals flipped on back faces.
+
+## Benchmarking
+
+`bench/` is a performance harness. `bench/run.sh <label>` runs each scenario several times in a real window and writes JSON to `bench/results/<label>/` (git-ignored). `bench/compare.py <base> <candidate>` prints the change per metric with min and max across runs. Run-to-run spread is about two percent, so smaller differences are noise. Scenarios are generated in `bench/bench.gd`: `fill` is fragment-bound, the `grid_*` ones stress LOD and physics across 144 objects, and `physics_close` with `shot=<png>` saves a frame at a fixed physics tick for eyeballing. Measure before and after any performance change, and revert changes that show no gain.
 
 ## Other directories
 

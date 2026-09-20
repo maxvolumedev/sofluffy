@@ -1,6 +1,10 @@
 @tool
 extends Node
 
+# Default turbulence/jitter noise, shared by all Fur nodes. Duplicating it per node costs a CPU noise generation
+# and a texture's worth of video memory each. Use "Make Unique" in the inspector to customise it for one node.
+const DEFAULT_NOISE: Texture2D = preload("res://addons/so_fluffy/turbulence_default.tres")
+
 ## Show fur in editor. Fur rendering is relatively expensive, so it is recommened to disable this when not needed.
 @export
 var preview_in_editor: bool = true:
@@ -48,13 +52,20 @@ var number_of_shells: int = 64:
 			setup_materials()
 		notify_property_list_changed()
 
+# number of discrete LOD steps between lod_min_distance and lod_max_distance
+const LOD_STEPS: int = 8
+# fraction of a step the distance has to overshoot before the LOD switches
+const LOD_HYSTERESIS: float = 0.15
+var lod_step: int = 0
+
 var lod: int = 0:
 	set(v):
 		var old_lod = lod
 		lod = v
 		if lod != old_lod:
 			apply_lod()
-			setup_materials()
+			# strand thickness is the only shader parameter that depends on the LOD
+			update_lod_thickness()
 
 
 ## Minimum distance from the camera at which lower-detail LODs are used.
@@ -129,7 +140,7 @@ var thickness_scale: float = 1.5:
 
 ## Noise texture to overlay displacement turbulence on the fur. Best provided as a normal map.
 @export
-var turbulence_texture: Texture2D = preload("res://addons/so_fluffy/turbulence_default.tres").duplicate():
+var turbulence_texture: Texture2D = DEFAULT_NOISE:
 	set(v):
 		turbulence_texture = v
 		setup_materials()	
@@ -143,7 +154,7 @@ var turbulence_strength: float = 0.3:
 
 ## Noise texture to add high-frequency jitter on the fur.
 @export
-var jitter_texture: Texture2D = preload("res://addons/so_fluffy/turbulence_default.tres").duplicate():
+var jitter_texture: Texture2D = DEFAULT_NOISE:
 	set(v):
 		jitter_texture = v
 		setup_materials()	
@@ -287,7 +298,14 @@ var emission_texture: Texture2D:
 
 ## controls how stiff the strands are over their length - higher numbers make the strands more bendy
 @export_range(0, 4, 0.01, "or_greater")
-var stiffness: float = 1.0
+var stiffness: float = 1.0:
+	set(v):
+		stiffness = v
+		setup_materials()
+
+# last physics values sent to the shader, used to skip redundant updates when the fur is at rest
+var sent_pos_offset: Vector3 = Vector3.ZERO
+var sent_rot_offset: Vector3 = Vector3.ZERO
 
 
 
@@ -435,6 +453,20 @@ func apply_lod():
 		shells[base].next_pass = shells[next]
 		lod_shells.append(shells[next])
 
+# lower number of shells means visually less dense fur. We adjust the thickness based on an empirical formula
+# to compensate for the loss of strand pixels
+func lod_thickness_scale() -> float:
+	var lod_thickness: float = 4.5987 * pow(lod_shell_count, -0.2807) if lod_enabled else 1.0
+	return thickness_scale * lod_thickness
+
+
+# update the LOD-dependent thickness on the shells that are rendered at the current LOD
+func update_lod_thickness() -> void:
+	var t: float = lod_thickness_scale()
+	for mat: ShaderMaterial in lod_shells:
+		mat.set_shader_parameter("thickness_scale", t)
+
+
 # setup parameters for all shell materials
 func setup_materials():
 	if mesh == null:
@@ -448,20 +480,20 @@ func setup_materials():
 func configure_material_for_level(mat: Material, level: int):
 	var h = float(level) / (number_of_shells-1)
 	
-	# lower number of shells means visually less dense fur. We adjust the thickness based on an empirical formula
-	# to compensate for the loss of strand pixels
-	var lod_thickness = 4.5987 * pow(lod_shell_count, -0.2807) if lod_enabled else 1.0
-
 	# growth
 	mat.set_shader_parameter("height", length)
 	mat.set_shader_parameter("normal_strength", normal_strength)
 	mat.set_shader_parameter("static_direction_local", static_direction_local)
 	mat.set_shader_parameter("static_direction_world", static_direction_world)
 	mat.set_shader_parameter("h", h)
+	# how strongly this shell follows the physics offsets - tips move more than roots
+	mat.set_shader_parameter("physics_h", pow(h, stiffness))
 	mat.set_shader_parameter("heightmap_texture", heightmap_texture)
 	mat.set_shader_parameter("use_heightmap_texture", heightmap_texture != null)
 	mat.set_shader_parameter("turbulence_texture", turbulence_texture)
 	mat.set_shader_parameter("turbulence_strength", turbulence_strength)
+	mat.set_shader_parameter("turbulence_falloff", pow(1.0 - h * 0.5, turbulence_strength))
+	mat.set_shader_parameter("height_shade", pow(h, 0.9))
 	mat.set_shader_parameter("jitter_texture", jitter_texture)
 	mat.set_shader_parameter("jitter_strength", jitter_strength)
 	mat.set_shader_parameter("density", density)
@@ -469,7 +501,7 @@ func configure_material_for_level(mat: Material, level: int):
 	mat.set_shader_parameter("scruffiness", scruffiness)
 	mat.set_shader_parameter("thickness_curve", thickness_curve)
 	mat.set_shader_parameter("use_thickness_curve", thickness_curve != null)
-	mat.set_shader_parameter("thickness_scale", thickness_scale * lod_thickness)
+	mat.set_shader_parameter("thickness_scale", lod_thickness_scale())
 	mat.set_shader_parameter("render_skin", render_skin)
 	# Albedo
 	mat.set_shader_parameter("color", albedo_color)
@@ -497,10 +529,18 @@ func init_physics():
 	previous_position = mesh.transform.origin
 	previous_rotation = mesh.transform.basis.get_euler()
 
-	for mat in shells:
-		# initial Physics parameters
-		mat.set_shader_parameter("physics_pos_offset", Vector3.ZERO)
-		mat.set_shader_parameter("physics_rot_offset", Basis.IDENTITY)
+	send_physics(Vector3.ZERO, Vector3.ZERO, true)
+
+
+# Physics offsets are per-instance shader uniforms: one update covers all shells, and the shader scales
+# them per shell by physics_h. Note that this means multiple Fur nodes on one geometry share them.
+func send_physics(pos_offset: Vector3, rot_offset: Vector3, force: bool = false) -> void:
+	if force or !pos_offset.is_equal_approx(sent_pos_offset):
+		sent_pos_offset = pos_offset
+		mesh.set_instance_shader_parameter("physics_pos_offset", pos_offset)
+	if force or !rot_offset.is_equal_approx(sent_rot_offset):
+		sent_rot_offset = rot_offset
+		mesh.set_instance_shader_parameter("physics_rot_offset", rot_offset)
 
 func _process(_delta):
 	# LOD
@@ -519,8 +559,13 @@ func _process(_delta):
 		# lod distance in the range [0, 1]	
 		var rel_dist: float = clamp((camera.transform.origin.distance_to(closest) - lod_min_distance) / (lod_max_distance - lod_min_distance), 0, 1)
 
-		# linearly scale number of shells
-		lod = clamp(floor(rel_dist * number_of_shells), 0, number_of_shells-1)
+		# Quantise into discrete steps. Every LOD change rewires the material chain, so only switch once the
+		# distance has moved clearly past the midpoint between two steps (hysteresis) to avoid flip-flopping.
+		var target: float = rel_dist * LOD_STEPS
+		if abs(target - lod_step) > 0.5 + LOD_HYSTERESIS:
+			lod_step = roundi(target)
+			# linearly scale number of shells
+			lod = clamp(floor(float(lod_step) / LOD_STEPS * number_of_shells), 0, number_of_shells-1)
 
 
 func closest_point_on_aabb(aabb: AABB, p: Vector3):
@@ -562,18 +607,10 @@ func linear_spring_physics(delta: float):
 
 	spring_velocity = spring_velocity.limit_length( 200.0 * length )
 
-	# iterate through materials from 0 length to 1 and set physics params
-	var dh = 1.0 / (number_of_shells-1)
-	var h = dh
-
 	spring_offset = spring_offset.limit_length(length / st * stretch)
 
-	for i in range(number_of_shells):
-		var mat = shells[i]
-		var offset_at_height = st * spring_offset * pow(h * i, stiffness)
-		mat.set_shader_parameter("physics_pos_offset", -offset_at_height)
-		i+=1
-		
+	send_physics(-st * spring_offset, sent_rot_offset)
+
 	previous_position = mesh.transform.origin
 
 
@@ -605,16 +642,8 @@ func rotational_spring_physics(delta: float):
 	
 	spring_rotation += p
 	
-	# iterate through materials from 0 length to 1 and set physics params
-	var dh = 1.0 / (number_of_shells-1)
-	var h = dh	
-
 	spring_rotation = spring_rotation.limit_length(PI * length / 2.0)
 
-	for i in range(number_of_shells):
-		var mat = shells[i]
-		var rotation_at_height = rotational_physics_scale * spring_rotation * pow(h * i, stiffness)
-		mat.set_shader_parameter("physics_rot_offset", Basis.from_euler(rotation_at_height))
-		i+=1
-		
+	send_physics(sent_pos_offset, rotational_physics_scale * spring_rotation)
+
 	previous_rotation = mesh.transform.basis.get_euler()
