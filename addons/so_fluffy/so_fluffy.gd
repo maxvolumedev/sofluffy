@@ -363,10 +363,8 @@ func _exit_tree() -> void:
 # remove fur material from the material chain. Returns false if the passed material is itself a fur material.
 func remove_fur_material(mat: Material) -> bool:
 	if mat == null:
-		print("no material")
 		return false
 	if mat.has_meta("is_fur"):
-		print("material is fur - returning false")
 		return false
 
 	while mat.next_pass != null:		
